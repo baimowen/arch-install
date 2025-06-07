@@ -4,9 +4,9 @@
 *   [设置字体大小](##设置字体大小)
 *   [更新包管理](##更新包管理)
 *   [分区管理](##分区管理)
-    *   [分区规划](###分区规划（使用GPT分区表）)
-        *   [系统盘](####系统盘（/dev/sda）)
-        *   [数据盘](####数据盘（/dev/sdb）)
+    *   [分区规划](###分区规划)
+        *   [系统盘](####系统盘 (/dev/sda))
+        *   [数据盘](####数据盘 (/dev/sdb))
 
     *   [对系统盘进行分区](###对系统盘进行分区)
     *   [对数据盘进行分区](###对数据盘进行分区)
@@ -16,7 +16,7 @@
 *   [生成分区表](##生成分区表)
 *   [设置时区、编码](##设置时区、编码)
 *   [设置主机名](##设置主机名)
-*   [网络配置](##网络配置)
+*   [网络管理](##网络管理)
 *   [添加用户](##添加用户)
 *   [安装引导](##安装引导)
 *   [验证](##验证)
@@ -131,7 +131,8 @@ ef00 EFI<br>
 检查分区信息：<br>
 gdisk -l /dev/sda<br>
 </div>
-<div style="float: right; width: 50%;">
+<div style="float: right; width: 50%;"></div>
+<div style="">
 <img src="pic/create efi.png" style="zoom: 110%" />
 <img src="pic/create filesystem.png" style="zoom: 110%" />
 <img src="pic/create swap.png" style="zoom: 110%" />
@@ -139,7 +140,9 @@ gdisk -l /dev/sda<br>
 </div>
 <div style="clear: both;"></div>
 
-### 分区规划（使用GPT分区表）
+### 分区规划
+
+**使用GPT分区表**
 
 #### 系统盘 (/dev/sda)
 
@@ -236,6 +239,12 @@ mkfs.btrfs -f -L "OTHERDATE" /dev/datavg/otherdata
 >   btrfs subvolume delete /mnt/<子卷名>       # 删除btrfs子卷（挂载状态）
 >   ```
 
+检查挂载点和子卷的关系：
+
+```bash
+findmnt -t btrfs -o TARGET,SOURCE,FSTYPE,OPTIONS
+```
+
 ### 挂载文件系统
 
 ```bash
@@ -268,7 +277,6 @@ btrfs subvolume list /mnt/<子卷名>
 
 ```bash
 # ===================== 维护命令 =====================
-
 sudo btrfs subvolume list /                # 检查Btrfs子卷
 sudo btrfs filesystem usage /              # 查看空间使用
 sudo btrfs filesystem defrag -r /mnt/data  # 碎片整理
@@ -277,8 +285,66 @@ sudo rsync -av --delete /etc/ /mnt/etc/                                  # 定�
 sudo btrfs subvolume snapshot / /.snapshots/$(date +%Y%m%d)              # 创建系统快照
 sudo btrfs subvolume snapshot /home /mnt/snapshots/home_$(date +%Y%m%d)  # 创建数据快照
 
-sudo chattr +c /     # 禁用CoW对系统目录
-sudo chattr +C /var  # 禁用CoW对日志目录
+sudo chattr +c /                # 禁用CoW对系统目录
+sudo chattr +C /var             # 禁用CoW对日志目录
+sudo chattr +C /var/lib/mysql   # 禁用cow对数据库
+sudo chattr +C /var/lib/docker  # 禁用CoW对容器
+
+# 检查文件系统
+sudo btrfs scrub start /mnt/data
+
+# 平衡文件系统
+sudo btrfs balance start -dusage=50 /mnt/data
+
+# 碎片整理
+sudo btrfs filesystem defrag -r /mnt/data
+
+# 启用压缩
+btrfs property set /mnt compression zstd
+btrfs property set /mnt/home compression zstd:3
+
+# btrfs透明压缩
+sudo btrfs filesystem defrag -czstd /mnt/data
+
+# 系统盘用高压缩比（zstd:3），数据盘用平衡模式（zstd:1）
+sudo btrfs property set /mnt/data compression zstd:1
+
+# 创建系统快照
+sudo btrfs subvolume snapshot -r / /.snapshots/$(date +%Y%m%d)
+
+# 自动清理旧快照
+sudo find /.snapshots -maxdepth 1 -mtime +7 -exec btrfs subvolume delete {} \;
+
+# 系统崩溃时：
+# * 从Live USB启动
+# * 挂载系统盘并回滚快照：
+mount /dev/sda4 /mnt/snaps
+btrfs subvolume snapshot /mnt/snaps/@system_snaps/20230801 /mnt/@restore
+btrfs subvolume set-default 256 /mnt/@restore
+
+# 数据误删恢复：
+btrfs send /mnt/snaps/@user_home_backup | btrfs receive /home/new_restore
+
+# 对根分区启用zstd压缩
+sudo btrfs property set / compression zstd:3
+
+# 对已有文件压缩
+btrfs filesystem defragment -r -czstd /
+systemctl enable --now btrfs-maintenance.timer
+
+# 查看压缩率
+sudo compsize -x /
+
+# btrfs自动维护
+cat > /etc/systemd/system/btrfs-maintenance.service <<EOF
+[Unit]
+Description=Btrfs Monthly Maintenance
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/btrfs balance start -dusage=50 /
+ExecStart=/usr/bin/btrfs scrub start /
+EOF
 ```
 
 >   我的分区情况如下：
@@ -317,7 +383,8 @@ sudo chattr +C /var  # 禁用CoW对日志目录
 ```bash
 pacstrap /mnt linux linux-firmware linux-headers base base-devel vim bash-completion
 arch-chroot /mnt
-pacman -S --noconfirm btrfs-progs lvm2 sudo nano dhcpcd openssh
+pacman -Syu --noconfirm
+pacman -S --noconfirm btrfs-progs lvm2 sudo nano dhcpcd openssh snapper btrfsmaintenance
 ```
 
 -   `btrfs-progs`：Btrfs 文件系统工具
@@ -338,35 +405,174 @@ pacman -S --noconfirm btrfs-progs lvm2 sudo nano dhcpcd openssh
 >
 >   全新安装时应首先使用 `pacstrap` 安装linux内核和工具包，否则 `chroot` 直接进入会报错，未安装系统
 
-
+---
 
 ## 生成分区表
 
+live环境：
 
+```bash
+genfstab -U /mnt
+genfstab -U /mnt >> /mnt/etc/fstab
+```
+
+*   `-U`：UEFI
+
+---
 
 ## 设置时区、编码
 
+```bash
+arch-chroot /mnt  # 进入新系统
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  # 设置时区为shanghai
+hwclock --systohc                                        # 同步硬件时间
 
+or
+
+timedatectl set-timezone Asia/Shanghai                   # 设置时区
+timedatectl set-ntp true                                 # 同步系统时间
+timedatectl status                                       # 验证
+
+cp /etc/locale.gen /etc/locale.gen.bak
+# 取消注释指定编码
+sed -i 's/^#\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+sed -i 's/^#\(zh_CN.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+
+sed -i -E 's/^#(en_US|zh_CN\..*)/\1/' /etc/locale.gen    # 批量取消注释
+grep -E '^(en_US|zh_CN)' /etc/locale.gen                 # 验证修改结果
+locale-gen                                               # 应用修改
+echo "LANG=en_US.UTF-8" > /etc/locale.conf               # 设置系统默认语言
+```
+
+>   以下操作非特殊说明环境，均为 `chroot` 进入新系统的环境
+
+---
 
 ## 设置主机名
 
+```bash
+echo "archlinux" > /etc/hostname
+# 配置hosts文件
+cat >> /etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   archlinux.localdomain archlinux
+EOF
+```
+
+主机名称随意
+
+---
+
+## 网络管理
+
+```bash
+# 无线网络使用networkmanager
+pacman -S --noconfirm networkmanager
+systemctl enable NetworkManager  # 设置开机自启，注意大小写
+
+# 有线网络使用dhcp
+systemctl enable dhcpcd.service
+```
 
 
-## 网络配置
 
+该处操作为**安装好系统重启后**的操作：
 
+```bash
+ip a            # 查看网卡名称
+or
+nmcli con show  # 查看网卡名称
+nmcli con mod ipv4.method manaul \
+              ipv4.address <ip_addr>/<netmask> \
+              ipv4.gateway <gateway> \
+              ipv4.dns "114.114.114.114 8.8.8.8"
+```
+
+*   `ipv4.method`：网络连接方式
+*   `ipv4.addres`：设置ip地址
+*   `ipv4.gateway`：设置网关
+*   `ipv4.dns`：设置域名解析服务器，引号内可以设置多个用空格隔开
+
+或者可以使用 `nmtui` 交互式操作管理网络
+
+>   ip -o -4 route show default | awk '{print $5}' | head -n1    获取第一个网卡的名称
+
+---
 
 ## 添加用户
 
+首先设置root用户密码：
 
+```
+[root@archiso /]# passwd
+[root@archiso /]# useradd -m -G wheel -s /bin/bash <username>
+[root@archiso /]# passwd <username>
+[root@archiso /]# sed -i '/^# %wheel ALL=(ALL:ALL) ALL/s/^# //' /etc/sudoers
+[root@archiso /]# su - <username>
+[<username>@archiso ~]$ sudo -v
+```
+
+>   [!tip]
+>
+>   如果忘记root密码，可以再次进入live环境，使用 `arch-chroot` 进入系统执行 passwd 命令
+
+以上步骤为：修改root密码 -> 添加普通用户 -> 修改普通用户密码 -> 将普通用户添加到sudoers -> 切换到普通用户 -> 验证sudo权限
+
+---
 
 ## 安装引导
+
+```bash
+pacman -S --noconfirm grub efibootmgr efivar adm-ucode/intel-ucode  # intel芯片安装intel-ucode，amd芯片安装amd-ucode
+grubinstall /dev/sda  # 安装grub
+cp /etc/default/grub /etc/default/grub.bak  # 重要操作前记得备份
+sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3"/g' /etc/default/grub  # 启动时生成日志
+sed -i 's/GRUB_TIMEOUT=5/GRUB_TIMEOUT=2/' /etc/default/grub                   # 可选：缩短grub等待时间
+sudo sed -i 's/GRUB_GFXMODE=auto/GRUB_GFXMODE=1920x1080/g' /etc/default/grub  # 可选：修改grub分辨率为1920x1080
+grub-mkconfig -o /boot/grub/grub.cfg  # 生成grub配置
+```
 
 
 
 ## 验证
 
+```bash
+mount | grep btrfs
+btrfs filesystem show
+```
+
 
 
 ## 完成安装
 
+退出 `chroot` 卸载全部分区后重启，在关机后拔掉u盘即可
+
+```
+root@archiso ~ # umount -R /mnt
+root@archiso ~ # reboot
+```
+
+
+
+## 杂项设置
+
+文件 `~/.bashrc`
+
+```bash
+cat << ‘EOF’ | tee -a ~/.bashrc
+[ ! -e ~/.dircolors ] && eval $(dircolors -p > ~/.dircolors)
+[ -e /bin/dircolors ] && eval $(dircolors -b ~/.dircolors)
+EOF
+source ~/.bashrc
+```
+
+
+
+快照工具
+
+```bash
+sudo pacman -S --noconfirm snapper
+snapper -c root create-config /
+sudo systemctl enable snapper-timeline.timer snapper-cleanup.timer
+```
